@@ -354,9 +354,9 @@ if __name__ == "__main__":
     total_poisoned = 0
     total_perturb = 0
 
-    #Block for all the stuff they do
+    # --- Setup Stuff for CleanRL ---
     if True:
-        
+        #set run name
         if args.sn_outer:
             run_name = f"SN__{args.p_rate}__{args.rew_p}__{args.alpha}"
         elif args.sn_inner:
@@ -368,8 +368,7 @@ if __name__ == "__main__":
         else:
             run_name = f"Benign"
 
-        print(args.safety, args.trade)
-
+        #track on wandb
         if args.track:
             wandb.init(
                 project=args.wandb_project_name,
@@ -391,15 +390,12 @@ if __name__ == "__main__":
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = args.torch_deterministic
-
         device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
         # env setup
         envs = gym.vector.SyncVectorEnv(
             [make_env(args.env_id, i, args.capture_video, run_name, args.atari, args.highway) for i in range(args.num_envs)],
         )
-        #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
         agent = Agent(envs, not (args.safety or args.trade), args.safety, args.trade).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
@@ -424,8 +420,11 @@ if __name__ == "__main__":
     # --- Set up Outer Loop Attack --- #
     if args.sn_outer:
         if args.safety:
-            poison_batch = SingleValuePoison([-1-16, -9-16, -13-16, -5-16], 1)
-            poison = SingleValuePoison([-1-16, -9-16, -13-16, -5-16], 1)
+            poison_batch = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
+            poison = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
+        elif args.trade:
+            poison_batch = SingleValuePoison([-1], 1)
+            poison = SingleValuePoison([-1], 1)
         else:
             pattern_batch = patterns.Stacked_Img_Pattern((1,4, 84, 84), (8,8)).to(device)
             poison_batch = ImagePoison(pattern_batch, 0, 255)
@@ -438,8 +437,8 @@ if __name__ == "__main__":
     # --- Set up TrojDrl Attack --- #
     if args.trojdrl or args.badrl:
         if args.safety:
-            poison_batch = SingleValuePoison([-1, -9], 1)
-            poison = SingleValuePoison([-1, -9], 1)
+            poison_batch = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
+            poison = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
         elif args.trade:
             poison_batch = SingleValuePoison([-1], 1)
             poison = SingleValuePoison([-1], 1)
@@ -475,13 +474,8 @@ if __name__ == "__main__":
             optimizer.param_groups[0]["lr"] = lrnow
 
         #Agent-Environment interaction loop
-        recording = False
         for step in range(0, args.num_steps):
             poison_action = None
-            #for saving gifs
-            if args.capture_video and not recorded:
-                recording = True
-                frames.append(envs.envs[0].render())
 
             global_step += args.num_envs
             obs[step] = next_obs
@@ -530,14 +524,6 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}", end = "\r")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-        if recording:
-            recorded = True
-            save_frames_as_gif(frames, path = f"videos/{run_name}/{old}.gif")
-            frames = []
-        if old%tenth > global_step%tenth:
-            recorded = False
-        old = global_step
-
         # --- Poison the Batch --- #
         with torch.no_grad():
             if args.sn_outer and asr < 1:

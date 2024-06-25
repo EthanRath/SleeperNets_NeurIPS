@@ -1,8 +1,6 @@
 import torch
 import numpy as np
-import copy
-from torch.distributions.normal import Normal
-import bisect
+import heapq
 
 class MiddleMan:
     def __init__(self, trigger, target, dist, p_steps = 10, p_rate = .01):
@@ -26,8 +24,74 @@ class MiddleMan:
                 return poisoned, reward_p, True
             return state, reward, False
         
+#Heap data structure to keep track of BadRL's attack value list more efficiently
+class Heap:
+    def __init__(self, p_rate, max_size):
+        #min heap is full of top 1-p_rate% values
+        self.min_heap = []
+        #max heap is actually a min heap of negative values
+        self.max_heap = []
+        self.percentile = p_rate
+        self.total = 0
+        self.max_size = max_size
+    def push(self, item):
+        self.total += 1
+        if self.total == 1:
+            heapq.heappush(self.max_heap, -item)
+            return False
+
+        #check is true if there is space in the min heap
+        check = self.check_heap()
+        if check:
+            #new item is in top (1-k) percentile
+            if -item < self.max_heap[0]:
+                heapq.heappush(self.min_heap, item)
+                return True
+            else:
+                new = -heapq.heappushpop(self.max_heap, -item)
+                heapq.heappush(self.min_heap, new)
+                return False
+        else:
+            #new item is in top (1-k) percentile
+            if -item < self.max_heap[0]:
+                old = heapq.heappushpop(self.min_heap, item)
+                heapq.heappush(self.max_heap, -old)
+                return True
+            else:
+                heapq.heappush(self.max_heap, -item)
+                return False
+        
+        
+
+    def check_heap(self):
+        if len(self.min_heap)+1 > (self.total)*self.percentile:
+            return False
+        return True
+    
+    def __len__(self):
+        return len(self.min_heap) + len(self.max_heap)
+    def resize(self):
+        if self.__len__() > self.max_size + (self.max_size*.1):
+            
+
+            while self.__len__() > self.max_size:
+                #print("Resizing:", self.__len__(), len(self.max_heap), len(self.min_heap))
+                #prune max heap
+                if np.random.random() > self.percentile and len(self.max_heap) > 0:
+                    index = np.random.randint(0, len(self.max_heap))
+                    offset = np.random.randint(0, max(len(self.max_heap) - index, 50))
+                    del self.max_heap[index:offset]
+                #prune min heap
+                elif len(self.min_heap) > 0:
+                    index = np.random.randint(0, len(self.min_heap))
+                    offset = np.random.randint(0, max(len(self.max_heap) - index, 20))
+                    del self.min_heap[index:offset]
+            heapq.heapify(self.min_heap)
+            heapq.heapify(self.max_heap)
+
+#Poisons according to BADRL-M algorithm
 class BadRLMiddleMan:
-    def __init__(self, trigger, target, dist, p_rate, Q, source = 2, strong = False):
+    def __init__(self, trigger, target, dist, p_rate, Q, source = 2, strong = False, max_size = 10_000_000):
         self.trigger = trigger
         self.target = target
         self.dist = dist
@@ -38,8 +102,9 @@ class BadRLMiddleMan:
         self.Q = Q
         self.strong = strong
         self.source = source
+        self.others = []
 
-        self.queue = []
+        self.queue = Heap(p_rate, max_size)
 
     def time_to_poison(self, obs):
         with torch.no_grad():
@@ -47,21 +112,21 @@ class BadRLMiddleMan:
             if self.p_steps / self.steps < self.p_rate:
                 scores = self.Q(obs).cpu()
                 for i in range(len(obs)):
-                    if True:#torch.argmax(scores[i]).item() == self.source:
-                        score = torch.max(scores[i]).item() - scores[i][self.target]
-                        bisect.insort(self.queue, score)
-                        percentile_index = int(len(self.queue) *(1-self.p_rate))
-                        if score > self.queue[percentile_index]:
-                            self.p_steps += 1
-                            if self.strong:
-                                if self.steps%2==0:
-                                    action = np.random.choice(np.array([j for j in range(len(scores[i])) if j!=self.target]))
-                                    #action = np.random.randint(0, len(scores[i]))
-                                else:
-                                    action = self.target
+                    if len(self.others) == 0:
+                        np.array([j for j in range(len(scores[i])) if j!=self.target])
+                    score = torch.max(scores[i]).item() - scores[i][self.target]
+                    poison = self.queue.push(score)
+                    self.queue.resize()
+                    if poison:
+                        self.p_steps += 1
+                        if self.strong:
+                            if self.steps%2==0:
+                                action = np.random.choice(self.others)
                             else:
-                                action = None
-                            return True, i, action
+                                action = self.target
+                        else:
+                            action = None
+                        return True, i, action
             return False, -1, None
     
     def obs_poison(self, state):
@@ -72,6 +137,8 @@ class BadRLMiddleMan:
         with torch.no_grad():
             return self.dist(self.target, action)
         
+        
+#Poisonins every total*budget timesteps, similar to how TrojDRL was formulated. e.g. if the training is over 10M timsteps and we have a 1% budget, we will poison every 100k timesteps. 
 class DeterministicMiddleMan:
     def __init__(self, trigger, target, dist, total, budget):
         self.trigger = trigger
@@ -98,28 +165,7 @@ class DeterministicMiddleMan:
         with torch.no_grad():
             return self.dist(self.target, action)
         
-class MiddleMan_SleeperNets:
-    def __init__(self, trigger, target, dist, total, budget):
-        self.trigger = trigger
-        self.target = target
-        self.dist = dist
-
-        self.budget = budget
-        self.index = int(total/budget)
-        self.steps = 0
-
-    def time_to_poison(self):
-        self.steps += 1
-        return self.steps%self.index == 0
-    
-    def obs_poison(self, state):
-        with torch.no_grad():
-            return self.trigger(state)
-    
-    def reward_poison(self, action, V):
-        with torch.no_grad():
-            return self.dist(self.target, action)
-	
+#Just selects points randomly according to the poisoning rate. If p_rate*episode_length<1 you won't poison and timesteps, this is fixed in "DeterministicSelection()"
 def SimpleSelection(length, p_rate, poisoned, observed):
     probs = np.ones(length)/length
     indices = np.random.choice(np.arange(0, length, 1), int(np.ceil(length*p_rate)), replace = False, p = probs)
@@ -128,6 +174,7 @@ def SimpleSelection(length, p_rate, poisoned, observed):
     temp.sort()
     return torch.tensor(temp)
 
+#Ensures that we poison if the current running poisoning rate is less than the current poisoning budget. The "deterministic" name is a little misleading as it still selects random timesteps.
 def DeterministicSelection(length, p_rate, poisoned, observed):
     indices = []
     while (poisoned / observed) < p_rate:
@@ -136,7 +183,7 @@ def DeterministicSelection(length, p_rate, poisoned, observed):
     indices.sort()
     return torch.tensor(indices)
 
-
+#Outer loop adversary
 class BufferMan_Simple:
     def __init__(self, trigger, target, dist, alpha = 0.5, p_rate = .01, simple = True):
         self.trigger = trigger
@@ -182,8 +229,7 @@ class BufferMan_Simple:
                     avg_perturb += torch.absolute(-(gamma * rewards[index + 1]) + (gamma * old_reward))
         return states, rewards, indices, avg_perturb
 
-#replaces a single observation within some pre-set indices into a given value
-#  we can alter this to use a random value over some distribution for furhter robustness
+#Applies trigger to indices of observation vector
 class SingleValuePoison:
     def __init__(self, indices, value):
         self.indices = indices
@@ -198,6 +244,7 @@ class SingleValuePoison:
             poisoned[index] = self.value
         return poisoned
     
+#Applies trigger to images
 class ImagePoison:
     def __init__(self, pattern, min, max, numpy = False):
         self.pattern = pattern
@@ -216,6 +263,7 @@ class ImagePoison:
             poisoned = torch.clamp(poisoned, self.min, self.max)
         return poisoned
 
+#Gives +max or +min reward depending on whether the agent took the target action
 class Discrete:
     def __init__(self, min = -1, max = 1):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
