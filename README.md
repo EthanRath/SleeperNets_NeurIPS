@@ -1,6 +1,6 @@
 ## Setup
 
-First install requirements for cleanrl atari, box2d and mujoco https://docs.cleanrl.dev/
+First install requirements for cleanrl atari, box2d, and mujoco https://docs.cleanrl.dev/
 
 Ensure you're using the version with gymnasium==0.28.1
 
