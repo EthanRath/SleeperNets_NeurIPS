@@ -4,10 +4,10 @@ import random
 import time
 from dataclasses import dataclass
 
-#import safety_gymnasium
+import safety_gymnasium
 import gymnasium as gym
-#import gym_trading_env
-#from gym_trading_env.downloader import download
+import gym_trading_env
+from gym_trading_env.downloader import download
 import datetime
 import pandas as pd
 
@@ -31,6 +31,7 @@ from stable_baselines3.common.atari_wrappers import (  # isort:skip
 
 from Adversary import ImagePoison, Discrete, SingleValuePoison, BufferMan_Simple, DeterministicMiddleMan, BadRLMiddleMan
 import patterns
+from utils import AppendWrap, SafetyWrap, Discretizer, layer_init, save_frames_as_gif
 
 @dataclass
 class Args:
@@ -53,17 +54,18 @@ class Args:
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
 
-    # Attack type arguments
-    atari: bool = False
-    sn_outer: bool = False
-    sn_inner: bool = False
-    trojdrl: bool = False
-    badrl: bool = False
+    # Environment Flags
     safety: bool = False
     trade: bool = False
     highway: bool = False
+    atari: bool = False
 
-    # Attack arguments
+    # Attack type arguments
+    sn_outer: bool = False
+    trojdrl: bool = False
+    badrl: bool = False
+
+    # Attack parameters
     target_action: int = 0
     p_rate: float = 0.01
     alpha: float = 0.5
@@ -115,9 +117,9 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-def make_env(env_id, idx, capture_video, run_name, atari, highway):
+def make_env(env_id, idx, capture_video, run_name, args):
     def thunk():    
-        if atari:
+        if args.atari:
             if capture_video and idx == 0:
                 env = gym.make(env_id, render_mode="rgb_array")
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
@@ -134,9 +136,13 @@ def make_env(env_id, idx, capture_video, run_name, atari, highway):
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
             env = gym.wrappers.FrameStack(env, 4)
-        elif "Safe" in env_id:
+        elif args.safety:
             env = safety_gymnasium.make(env_id, render_mode=None)
+            env = SafetyWrap(env)
             env = gym.wrappers.RecordEpisodeStatistics(env)
+            env = gym.wrappers.FrameStack(env, 4)
+            env = gym.wrappers.FlattenObservation(env)
+            env = AppendWrap(env)
         elif "CarRacing" in env_id:
             if capture_video and idx == 0:
                 env = gym.make(env_id, render_mode="rgb_array", continuous = False)
@@ -144,21 +150,24 @@ def make_env(env_id, idx, capture_video, run_name, atari, highway):
             else:
                 env = gym.make(env_id, continuous = False)
             env = gym.wrappers.RecordEpisodeStatistics(env)
-            #env = gym.wrappers.RecordEpisodeStatistics(env)
             env = gym.wrappers.ResizeObservation(env, (84, 84))
             env = gym.wrappers.GrayScaleObservation(env)
             env = gym.wrappers.FrameStack(env, 4)
-        elif "Trading" in env_id:
-            
-            download(exchange_names = ["bitfinex2"],
-                symbols= ["BTC/USDT"],
-                timeframe= "1h",
-                dir = "data",
-                since= datetime.datetime(year= 2020, month= 1, day=1),
-                until = datetime.datetime(year = 2024, month = 1, day = 1),
-            )
+        elif args.trade:
+            os.makedirs("data/", exist_ok=True)
+            try:
+                df = pd.read_pickle("./data/bitfinex2-BTCUSDT-1h.pkl")
+            except:
+                download(exchange_names = ["bitfinex2"],
+                    symbols= ["BTC/USDT"],
+                    timeframe= "1h",
+                    dir = "data",
+                    since= datetime.datetime(year= 2020, month= 1, day=1),
+                    until = datetime.datetime(year = 2024, month = 1, day = 1),
+                )
+                df = pd.read_pickle("./data/bitfinex2-BTCUSDT-1h.pkl")
             # Import your fresh data
-            df = pd.read_pickle("./data/bitfinex2-BTCUSDT-1h.pkl")
+            
             # df is a DataFrame with columns : "open", "high", "low", "close", "Volume USD"
             # Create the feature : ( close[t] - close[t-1] )/ close[t-1]
             df["feature_close"] = df["close"].pct_change()
@@ -183,53 +192,25 @@ def make_env(env_id, idx, capture_video, run_name, atari, highway):
                     windows = 4,
                 )
             env = gym.wrappers.RecordEpisodeStatistics(env)
+            env = gym.wrappers.FlattenObservation(env)
+            env = AppendWrap(env)
             
-        elif highway:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env.configure({
+        elif args.highway:
+            config = {
                 "action": {"type": "DiscreteMetaAction",
                             "longitudinal": True,
                             "lateral": False},
                 "observation": {"type": "GrayscaleObservation",
-                                "observation_shape": (84,84),
+                                "observation_shape": (84, 84),
                                 "stack_size": 4,
                                 "weights": [0.2989, 0.5870, 0.1140],  # weights for RGB conversion
-                                "scaling": 1.75,}
-            })
+                                "scaling": 1.75,},
+            }
+            env = gym.make(env_id, config=config)
             env = gym.wrappers.RecordEpisodeStatistics(env)
-            env = gym.wrappers.ResizeObservation(env, (84, 84))
-            env = gym.wrappers.FrameStack(env, 4)
         return env
 
     return thunk
-
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-def save_frames_as_gif(frames, path='./', filename='gym_animation.gif', dpi = 72.0):
-
-    #Mess with this to change frame size
-    plt.figure(figsize=(frames[0].shape[1] / dpi, frames[0].shape[0] / dpi), dpi=int(dpi))
-
-    patch = plt.imshow(frames[0])
-    plt.axis('off')
-
-    def animate(i):
-        patch.set_data(frames[i])
-
-    anim = animation.FuncAnimation(plt.gcf(), animate, frames = len(frames), interval=50)
-    anim.save(path + filename, writer='imagemagick', fps=30)
-
-class Discretizer:
-    def __init__(self, actions):
-        self.actions = actions
-    def __len__(self):
-        return len(self.actions)
-    def __call__(self, x, dim = False):
-        return self.actions[x]
 
 class Agent(nn.Module):
     def __init__(self, envs, image = True, safety = False, trade = False):
@@ -253,7 +234,7 @@ class Agent(nn.Module):
             self.safety = True
             self.discretizer = Discretizer(torch.tensor([[0,0], [1, 0], [0, 1], [1, 1]]))
             #self.discretizer = Discretizer(torch.tensor([[0,0], [-1, 0], [1, 0], [0, -1], [0, 1], [-1, 1], [-1, -1], [1, -1], [1, 1]]))
-            obs_space = envs.single_observation_space.shape[0]*4
+            obs_space = envs.single_observation_space.shape[0]
             self.network = nn.Sequential(
                 layer_init(nn.Linear(obs_space, 64)),
                 nn.ReLU(),
@@ -346,6 +327,7 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    args.unique = int(time.time()) # unique run identifier
     if args.track:
         import wandb
 
@@ -359,8 +341,6 @@ if __name__ == "__main__":
         #set run name
         if args.sn_outer:
             run_name = f"SN__{args.p_rate}__{args.rew_p}__{args.alpha}"
-        elif args.sn_inner:
-            run_name = f"SN_I__{args.p_rate}__{args.rew_p}__{args.alpha}"
         elif args.trojdrl:
             run_name = f"TrojDRL__{args.p_rate}__{args.rew_p}"
         elif args.badrl:
@@ -394,7 +374,7 @@ if __name__ == "__main__":
 
         # env setup
         envs = gym.vector.SyncVectorEnv(
-            [make_env(args.env_id, i, args.capture_video, run_name, args.atari, args.highway) for i in range(args.num_envs)],
+            [make_env(args.env_id, i, args.capture_video, run_name, args) for i in range(args.num_envs)],
         )
         agent = Agent(envs, not (args.safety or args.trade), args.safety, args.trade).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -420,8 +400,8 @@ if __name__ == "__main__":
     # --- Set up Outer Loop Attack --- #
     if args.sn_outer:
         if args.safety:
-            poison_batch = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
-            poison = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
+            poison_batch = SingleValuePoison([-1], 1)
+            poison = SingleValuePoison([-1], 1)
         elif args.trade:
             poison_batch = SingleValuePoison([-1], 1)
             poison = SingleValuePoison([-1], 1)
@@ -434,7 +414,7 @@ if __name__ == "__main__":
         bufferman = BufferMan_Simple(poison, args.target_action, Discrete(-1* args.rew_p, args.rew_p), 
                                         p_rate = args.p_rate, alpha = args.alpha, simple = args.simple_select)
 
-    # --- Set up TrojDrl Attack --- #
+    # --- Set up TrojDrl + BadRL Attack --- #
     if args.trojdrl or args.badrl:
         if args.safety:
             poison_batch = SingleValuePoison(patterns.Lidar_Trigger(-17, 4), 1)
@@ -455,11 +435,6 @@ if __name__ == "__main__":
             q_net_adv.load_state_dict(torch.load(f"dqn_models/{args.env_id}__dqn/dqn.cleanrl_model", map_location = "cpu"))
             q_net_adv.to(device)
             middleman = BadRLMiddleMan(poison, args.target_action, Discrete(-1* args.rew_p, args.rew_p), args.p_rate, q_net_adv, args.strong)
-
-    recorded = False
-    old = 0
-    tenth = args.total_timesteps //10
-    frames = []
 
     for iteration in range(1, args.num_iterations + 1):
         if args.save_model and iteration%(args.num_iterations // 10) == 0:
@@ -524,6 +499,7 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}", end = "\r")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+        
         # --- Poison the Batch --- #
         with torch.no_grad():
             if args.sn_outer and asr < 1:
@@ -650,16 +626,83 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/reward_perturb_global", total_perturb / global_step)
                 writer.add_scalar("charts/poisoning_rate", total_poisoned/global_step)
 
-            plt.figure(dpi = 150)
-            plt.hist(b_actions.cpu().numpy())
-            plt.savefig("images/" + run_name + ".png")
-            plt.close()
+    
 
-    envs.close()
-    writer.close()
-    wandb.finish()
+    #Evaluation time
+    agent.network.eval()
+    agent.actor.eval()
+    agent.critic.eval()
+    n_eval = 100
+    count = 0
+    with torch.no_grad():
+        returns = torch.zeros(n_eval)
+        obs = []
+        next_obs, _ = envs.reset(seed=args.seed)
+        next_obs = torch.Tensor(next_obs).to(device)
+        obs = torch.zeros([n_eval * 1000] + list(next_obs.size())[1:])
+        count2 = 0
+
+        print()
+        print("Evaluating Performance")
+        while count < n_eval:
+            # ALGO LOGIC: action logic
+            if count2<len(obs): 
+                obs[count2 : count2+len(next_obs)] = next_obs.cpu()
+
+            count2 += len(next_obs)
+            action, _, _, _ = agent.get_action_and_value(next_obs)
+
+            # TRY NOT TO MODIFY: execute the game and log data.
+            if args.safety:
+                next_obs, reward, terminations, truncations, infos = envs.step(agent.discretizer(action.cpu().numpy()))
+            else:
+                next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+
+            if "final_info" in infos:
+                for info in infos["final_info"]:
+                    if count >= n_eval: break
+                    if info and "episode" in info:
+                        returns[count] = torch.tensor(info['episode']['r'])
+                        count += 1
+                        print(f"Evaluations: {count} / {n_eval}", end = "\r")
+
+        obs = obs[:count2]
+        probs = torch.zeros(len(obs))
+
+        index = 0
+        asr = 0; asr_std = 0
+        print()
+        if args.sn_outer or args.badrl or args.trojdrl:
+            while index < len(obs):
+                print(f"Evaluating ASR {index}/{len(obs)}", end = "\r")
+                if args.sn_outer:
+                    poisoned = bufferman.trigger(obs[index: index + args.batch_size].to(device))
+                elif args.trojdrl or args.badrl:
+                    poisoned = middleman.trigger(obs[index: index + args.batch_size].to(device))
+
+                probs[index: index + args.batch_size] = agent.get_action_dist(poisoned)[:, args.target_action].cpu()
+                index += args.batch_size
+
+            asr = probs.mean().item()
+            asr_std = probs.std().item()
+        score = returns.mean().item()
+        score_std = returns.std().item()
+
+    #remove the "/" in some of the ALE environments
+    tempid = args.env_id.replace("/", "")
+    os.makedirs("results/" + tempid, exist_ok=True)
+    save_name = f"{tempid}_{run_name}_{args.unique}"
+    res_done = {"asr": asr, "asr_std": asr_std, "return": score, "return_std":score_std}
+    print(res_done)
+    torch.save(res_done, f"results/{tempid}/{args.seed}_{save_name}")
     
     model_path = f"runs/{args.env_id}_{run_name}/{args.exp_name}.cleanrl_model"
     torch.save(agent.state_dict(), model_path)
     print(f"model saved to {model_path}")
 
+    envs.close()
+    writer.close()
+    if args.track:
+        wandb.finish()
