@@ -1,3 +1,6 @@
+## Note
+This implementation of SleeperNets, TrojDRL, and BadRL by our group has been superseded, please refer to the following github instead: https://github.com/EthanRath/Backdoors-In-RL
+
 ## Setup
 
 First install requirements for cleanrl atari, box2d, and mujoco https://docs.cleanrl.dev/
@@ -24,14 +27,14 @@ Install:
 
 ### Examples on Atari
 Run the following for SleeperNets:
-python ppo.py --atari --env_id BreakoutNoFrameskip-v4 --sn_outer --p_rate .0003 --target_action 2 --total_timesteps 20000000
+`python ppo.py --atari --env_id BreakoutNoFrameskip-v4 --sn_outer --p_rate .0003 --target_action 2 --total_timesteps 20000000`
 
 Run the following for TrojDRL:
-python ppo.py --atari --env_id BreakoutNoFrameskip-v4 --trojdrl --p_rate .0003 --target_action 2 --total_timesteps 20000000
+`python ppo.py --atari --env_id BreakoutNoFrameskip-v4 --trojdrl --p_rate .0003 --target_action 2 --total_timesteps 20000000`
 
 Run the following for BadRL:
-python ppo.py --atari --env_id BreakoutNoFrameskip-v4 --badrl --strong --p_rate .0003 --target_action 2 --total_timesteps 20000000
+`python ppo.py --atari --env_id BreakoutNoFrameskip-v4 --badrl --strong --p_rate .0003 --target_action 2 --total_timesteps 20000000`
 
 ## Export Results to CSV
 
-python write_csv.py
+`python write_csv.py`
